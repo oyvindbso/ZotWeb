@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="zotero_red">#CC2936</color>
+    <color name="zotero_dark">#222222</color>
+    <color name="white">#FFFFFF</color>
+    <color name="background_light">#FAFAFA</color>
+</resources>

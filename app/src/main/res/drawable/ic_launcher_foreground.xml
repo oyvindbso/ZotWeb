@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Background circle -->
+    <path
+        android:fillColor="#CC2936"
+        android:pathData="M54,54m-40,0a40,40 0,1 1,80 0a40,40 0,1 1,-80 0" />
+    <!-- Z letter -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,36 L72,36 L72,42 L46,66 L72,66 L72,72 L36,72 L36,66 L62,42 L36,42 Z" />
+</vector>
