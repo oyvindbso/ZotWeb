@@ -316,7 +316,7 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == STORAGE_PERMISSION_REQUEST) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 pendingDownload?.let {
-                    startDownload(it.url, it.userAgent, it.contentDisposition, it.mimeType)
+                    startHttpDownload(it.url, it.userAgent, it.contentDisposition, it.mimeType)
                 }
             } else {
                 Toast.makeText(this, "Storage permission needed for downloads", Toast.LENGTH_LONG).show()
