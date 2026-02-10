@@ -148,6 +148,8 @@ class MainActivity : AppCompatActivity() {
                 // Persist cookies after each page load
                 CookieManager.getInstance().flush()
                 swipeRefresh.isRefreshing = false
+                // Intercept blob creation so we can download even after URL.revokeObjectURL
+                injectBlobInterceptor(view)
             }
         }
 
@@ -194,14 +196,45 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun injectBlobInterceptor(view: WebView?) {
+        // Override URL.createObjectURL to store blobs before they can be revoked.
+        // Zotero revokes blob URLs after triggering the download, which causes
+        // fetch() to fail with "failed to fetch" for annotated PDF exports.
+        val js = """
+            (function() {
+                if (window._zotWebBlobStore) return;
+                window._zotWebBlobStore = {};
+                var origCreate = URL.createObjectURL.bind(URL);
+                var origRevoke = URL.revokeObjectURL.bind(URL);
+                URL.createObjectURL = function(blob) {
+                    var url = origCreate(blob);
+                    if (blob instanceof Blob) {
+                        window._zotWebBlobStore[url] = blob;
+                    }
+                    return url;
+                };
+                URL.revokeObjectURL = function(url) {
+                    origRevoke(url);
+                };
+            })();
+        """.trimIndent()
+        view?.evaluateJavascript(js, null)
+    }
+
     private fun handleBlobDownload(blobUrl: String, contentDisposition: String, mimeType: String) {
         val fileName = URLUtil.guessFileName(blobUrl, contentDisposition, mimeType)
-        // Inject JS that fetches the blob, converts to base64, and passes it to our interface
+        // Use the stored blob from our interceptor if available, otherwise fall back to fetch
         val js = """
             (async function() {
                 try {
-                    var response = await fetch('$blobUrl');
-                    var blob = await response.blob();
+                    var blob;
+                    if (window._zotWebBlobStore && window._zotWebBlobStore['$blobUrl']) {
+                        blob = window._zotWebBlobStore['$blobUrl'];
+                        delete window._zotWebBlobStore['$blobUrl'];
+                    } else {
+                        var response = await fetch('$blobUrl');
+                        blob = await response.blob();
+                    }
                     var reader = new FileReader();
                     reader.onloadend = function() {
                         var base64 = reader.result.split(',')[1];
