@@ -3,17 +3,17 @@ package org.zotweb.app
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
-import android.content.BroadcastReceiver
-import android.content.Context
+import android.content.ContentValues
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
+import android.util.Base64
 import android.webkit.CookieManager
-import android.webkit.DownloadListener
+import android.webkit.JavascriptInterface
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -26,6 +26,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+import java.io.File
+import java.io.FileOutputStream
 
 class MainActivity : AppCompatActivity() {
 
@@ -162,15 +164,90 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
     private fun setupDownloads() {
-        webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
-            if (needsStoragePermission()) {
-                pendingDownload = PendingDownload(url, userAgent, contentDisposition, mimeType)
-                requestStoragePermission()
+        webView.addJavascriptInterface(BlobDownloadInterface(), "ZotWebBlobDownload")
+
+        webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            if (url.startsWith("blob:")) {
+                handleBlobDownload(url, contentDisposition, mimeType)
             } else {
-                startDownload(url, userAgent, contentDisposition, mimeType)
+                if (needsStoragePermission()) {
+                    pendingDownload = PendingDownload(url, userAgent, contentDisposition, mimeType)
+                    requestStoragePermission()
+                } else {
+                    startHttpDownload(url, userAgent, contentDisposition, mimeType)
+                }
             }
-        })
+        }
+    }
+
+    private fun handleBlobDownload(blobUrl: String, contentDisposition: String, mimeType: String) {
+        val fileName = URLUtil.guessFileName(blobUrl, contentDisposition, mimeType)
+        // Inject JS that fetches the blob, converts to base64, and passes it to our interface
+        val js = """
+            (async function() {
+                try {
+                    var response = await fetch('$blobUrl');
+                    var blob = await response.blob();
+                    var reader = new FileReader();
+                    reader.onloadend = function() {
+                        var base64 = reader.result.split(',')[1];
+                        var mimeType = blob.type || '$mimeType';
+                        ZotWebBlobDownload.saveFile(base64, '$fileName', mimeType);
+                    };
+                    reader.readAsDataURL(blob);
+                } catch(e) {
+                    ZotWebBlobDownload.onError(e.message);
+                }
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
+        Toast.makeText(this, "Preparing download: $fileName", Toast.LENGTH_SHORT).show()
+    }
+
+    inner class BlobDownloadInterface {
+        @JavascriptInterface
+        fun saveFile(base64Data: String, fileName: String, mimeType: String) {
+            runOnUiThread {
+                try {
+                    val bytes = Base64.decode(base64Data, Base64.DEFAULT)
+                    saveBytesToDownloads(bytes, fileName, mimeType)
+                    Toast.makeText(this@MainActivity, "Downloaded: $fileName", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "Save failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onError(message: String) {
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, "Download failed: $message", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun saveBytesToDownloads(bytes: ByteArray, fileName: String, mimeType: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Use MediaStore for Android 10+
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            }
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            uri?.let {
+                contentResolver.openOutputStream(it)?.use { os ->
+                    os.write(bytes)
+                }
+            }
+        } else {
+            // Direct file write for older versions
+            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            val file = File(dir, fileName)
+            FileOutputStream(file).use { it.write(bytes) }
+        }
     }
 
     private fun needsStoragePermission(): Boolean {
@@ -188,7 +265,7 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun startDownload(
+    private fun startHttpDownload(
         url: String,
         userAgent: String,
         contentDisposition: String,
@@ -215,7 +292,6 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Downloading: $fileName", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
-            // Fallback: open in browser
             try {
                 startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
             } catch (_: Exception) {}
