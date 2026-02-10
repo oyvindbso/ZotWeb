@@ -22,6 +22,9 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -34,7 +37,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val ZOTERO_URL = "https://www.zotero.org/mylibrary"
         private const val ZOTERO_HOST = "zotero.org"
-        private const val FILE_CHOOSER_REQUEST = 1001
         private const val STORAGE_PERMISSION_REQUEST = 1002
     }
 
@@ -42,6 +44,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
     private var pendingDownload: PendingDownload? = null
+
+    private val fileChooserLauncher: ActivityResultLauncher<Intent> =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val data = if (result.resultCode == RESULT_OK) {
+                result.data?.data?.let { arrayOf(it) }
+            } else null
+            fileUploadCallback?.onReceiveValue(data)
+            fileUploadCallback = null
+        }
 
     private data class PendingDownload(
         val url: String,
@@ -63,6 +74,8 @@ class MainActivity : AppCompatActivity() {
         setupDownloads()
         setupSwipeRefresh()
 
+        setupBackNavigation()
+
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
         } else {
@@ -83,7 +96,6 @@ class MainActivity : AppCompatActivity() {
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            databaseEnabled = true
 
             // Cache settings for offline support and performance
             cacheMode = WebSettings.LOAD_DEFAULT
@@ -152,7 +164,7 @@ class MainActivity : AppCompatActivity() {
                 val intent = fileChooserParams?.createIntent()
                 if (intent != null) {
                     try {
-                        startActivityForResult(intent, FILE_CHOOSER_REQUEST)
+                        fileChooserLauncher.launch(intent)
                     } catch (_: Exception) {
                         fileUploadCallback?.onReceiveValue(null)
                         fileUploadCallback = null
@@ -325,18 +337,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == FILE_CHOOSER_REQUEST) {
-            val result = if (resultCode == RESULT_OK) {
-                data?.data?.let { arrayOf(it) }
-            } else null
-            fileUploadCallback?.onReceiveValue(result)
-            fileUploadCallback = null
-        }
-    }
-
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         webView.saveState(outState)
@@ -354,12 +354,16 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            super.onBackPressed()
-        }
+    private fun setupBackNavigation() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (webView.canGoBack()) {
+                    webView.goBack()
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
+        })
     }
 }
