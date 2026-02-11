@@ -114,10 +114,12 @@ class MainActivity : AppCompatActivity() {
             builtInZoomControls = true
             displayZoomControls = false
 
-            // Use a desktop user agent so Zotero serves the full web library
-            // instead of the mobile/touch-friendly version
-            userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 ZotWeb/1.0"
+            // Strip "Mobile" from UA so sites treat us as a tablet/desktop browser,
+            // but keep the real WebView UA intact so Cloudflare challenges pass
+            userAgentString = userAgentString
+                .replace("Mobile ", "")
+                .replace(" Mobile", "")
+                .plus(" ZotWeb/1.0")
 
             // Mixed content (some Zotero resources may need this)
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
