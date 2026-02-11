@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
 import android.content.ContentValues
+import android.graphics.Bitmap
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -22,6 +23,9 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -34,7 +38,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val ZOTERO_URL = "https://www.zotero.org/mylibrary"
         private const val ZOTERO_HOST = "zotero.org"
-        private const val FILE_CHOOSER_REQUEST = 1001
         private const val STORAGE_PERMISSION_REQUEST = 1002
     }
 
@@ -42,6 +45,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
     private var pendingDownload: PendingDownload? = null
+
+    private val fileChooserLauncher: ActivityResultLauncher<Intent> =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val data = if (result.resultCode == RESULT_OK) {
+                result.data?.data?.let { arrayOf(it) }
+            } else null
+            fileUploadCallback?.onReceiveValue(data)
+            fileUploadCallback = null
+        }
 
     private data class PendingDownload(
         val url: String,
@@ -63,6 +75,8 @@ class MainActivity : AppCompatActivity() {
         setupDownloads()
         setupSwipeRefresh()
 
+        setupBackNavigation()
+
         if (savedInstanceState != null) {
             webView.restoreState(savedInstanceState)
         } else {
@@ -83,7 +97,6 @@ class MainActivity : AppCompatActivity() {
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
-            databaseEnabled = true
 
             // Cache settings for offline support and performance
             cacheMode = WebSettings.LOAD_DEFAULT
@@ -101,14 +114,23 @@ class MainActivity : AppCompatActivity() {
             builtInZoomControls = true
             displayZoomControls = false
 
-            // User agent: append ZotWeb identifier so site knows it's a browser
-            userAgentString = "$userAgentString ZotWeb/1.0"
+            // Use a desktop user agent so Zotero serves the full web library
+            // instead of the mobile/touch-friendly version
+            userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 ZotWeb/1.0"
 
             // Mixed content (some Zotero resources may need this)
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         }
 
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                // Spoof as non-touch device before page scripts run, so Zotero
+                // serves the full desktop web library instead of the touch UI
+                injectDesktopMode(view)
+            }
+
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: WebResourceRequest
@@ -136,6 +158,8 @@ class MainActivity : AppCompatActivity() {
                 // Persist cookies after each page load
                 CookieManager.getInstance().flush()
                 swipeRefresh.isRefreshing = false
+                // Intercept blob creation so we can download even after URL.revokeObjectURL
+                injectBlobInterceptor(view)
             }
         }
 
@@ -152,7 +176,7 @@ class MainActivity : AppCompatActivity() {
                 val intent = fileChooserParams?.createIntent()
                 if (intent != null) {
                     try {
-                        startActivityForResult(intent, FILE_CHOOSER_REQUEST)
+                        fileChooserLauncher.launch(intent)
                     } catch (_: Exception) {
                         fileUploadCallback?.onReceiveValue(null)
                         fileUploadCallback = null
@@ -182,14 +206,75 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun injectDesktopMode(view: WebView?) {
+        // Hide touch capabilities so Zotero's web library shows the desktop UI.
+        // Must run before page scripts execute (called from onPageStarted).
+        val js = """
+            (function() {
+                // Remove touch event support detection
+                delete window.ontouchstart;
+                Object.defineProperty(window, 'ontouchstart', {
+                    get: function() { return undefined; },
+                    set: function() {},
+                    configurable: true
+                });
+                // Report zero touch points
+                Object.defineProperty(navigator, 'maxTouchPoints', {
+                    get: function() { return 0; },
+                    configurable: true
+                });
+                // Override matchMedia for touch queries
+                var origMatchMedia = window.matchMedia.bind(window);
+                window.matchMedia = function(query) {
+                    if (query.includes('pointer: coarse') || query.includes('hover: none')) {
+                        return { matches: false, media: query, addListener: function(){}, removeListener: function(){}, addEventListener: function(){}, removeEventListener: function(){}, dispatchEvent: function(){} };
+                    }
+                    return origMatchMedia(query);
+                };
+            })();
+        """.trimIndent()
+        view?.evaluateJavascript(js, null)
+    }
+
+    private fun injectBlobInterceptor(view: WebView?) {
+        // Override URL.createObjectURL to store blobs before they can be revoked.
+        // Zotero revokes blob URLs after triggering the download, which causes
+        // fetch() to fail with "failed to fetch" for annotated PDF exports.
+        val js = """
+            (function() {
+                if (window._zotWebBlobStore) return;
+                window._zotWebBlobStore = {};
+                var origCreate = URL.createObjectURL.bind(URL);
+                var origRevoke = URL.revokeObjectURL.bind(URL);
+                URL.createObjectURL = function(blob) {
+                    var url = origCreate(blob);
+                    if (blob instanceof Blob) {
+                        window._zotWebBlobStore[url] = blob;
+                    }
+                    return url;
+                };
+                URL.revokeObjectURL = function(url) {
+                    origRevoke(url);
+                };
+            })();
+        """.trimIndent()
+        view?.evaluateJavascript(js, null)
+    }
+
     private fun handleBlobDownload(blobUrl: String, contentDisposition: String, mimeType: String) {
         val fileName = URLUtil.guessFileName(blobUrl, contentDisposition, mimeType)
-        // Inject JS that fetches the blob, converts to base64, and passes it to our interface
+        // Use the stored blob from our interceptor if available, otherwise fall back to fetch
         val js = """
             (async function() {
                 try {
-                    var response = await fetch('$blobUrl');
-                    var blob = await response.blob();
+                    var blob;
+                    if (window._zotWebBlobStore && window._zotWebBlobStore['$blobUrl']) {
+                        blob = window._zotWebBlobStore['$blobUrl'];
+                        delete window._zotWebBlobStore['$blobUrl'];
+                    } else {
+                        var response = await fetch('$blobUrl');
+                        blob = await response.blob();
+                    }
                     var reader = new FileReader();
                     reader.onloadend = function() {
                         var base64 = reader.result.split(',')[1];
@@ -325,18 +410,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == FILE_CHOOSER_REQUEST) {
-            val result = if (resultCode == RESULT_OK) {
-                data?.data?.let { arrayOf(it) }
-            } else null
-            fileUploadCallback?.onReceiveValue(result)
-            fileUploadCallback = null
-        }
-    }
-
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         webView.saveState(outState)
@@ -354,12 +427,16 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            super.onBackPressed()
-        }
+    private fun setupBackNavigation() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (webView.canGoBack()) {
+                    webView.goBack()
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
+        })
     }
 }
