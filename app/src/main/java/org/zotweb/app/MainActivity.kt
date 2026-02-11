@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
 import android.content.ContentValues
+import android.graphics.Bitmap
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -113,14 +114,23 @@ class MainActivity : AppCompatActivity() {
             builtInZoomControls = true
             displayZoomControls = false
 
-            // User agent: append ZotWeb identifier so site knows it's a browser
-            userAgentString = "$userAgentString ZotWeb/1.0"
+            // Use a desktop user agent so Zotero serves the full web library
+            // instead of the mobile/touch-friendly version
+            userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 ZotWeb/1.0"
 
             // Mixed content (some Zotero resources may need this)
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         }
 
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                // Spoof as non-touch device before page scripts run, so Zotero
+                // serves the full desktop web library instead of the touch UI
+                injectDesktopMode(view)
+            }
+
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: WebResourceRequest
@@ -194,6 +204,36 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun injectDesktopMode(view: WebView?) {
+        // Hide touch capabilities so Zotero's web library shows the desktop UI.
+        // Must run before page scripts execute (called from onPageStarted).
+        val js = """
+            (function() {
+                // Remove touch event support detection
+                delete window.ontouchstart;
+                Object.defineProperty(window, 'ontouchstart', {
+                    get: function() { return undefined; },
+                    set: function() {},
+                    configurable: true
+                });
+                // Report zero touch points
+                Object.defineProperty(navigator, 'maxTouchPoints', {
+                    get: function() { return 0; },
+                    configurable: true
+                });
+                // Override matchMedia for touch queries
+                var origMatchMedia = window.matchMedia.bind(window);
+                window.matchMedia = function(query) {
+                    if (query.includes('pointer: coarse') || query.includes('hover: none')) {
+                        return { matches: false, media: query, addListener: function(){}, removeListener: function(){}, addEventListener: function(){}, removeEventListener: function(){}, dispatchEvent: function(){} };
+                    }
+                    return origMatchMedia(query);
+                };
+            })();
+        """.trimIndent()
+        view?.evaluateJavascript(js, null)
     }
 
     private fun injectBlobInterceptor(view: WebView?) {
